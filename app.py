@@ -52,6 +52,7 @@ from excel_processor import (
     strip_html_tags,
     SKIP_SHEETS,
     EXCLUDED_CONTACT_SOURCES,
+    EXCLUDED_CHAT_TOP15_SOURCES,
     MAX_UPLOAD_SIZE_MB,
 )
 
@@ -2062,30 +2063,43 @@ def generate_calls_top15_count_chart(top15_data: List[Dict], source: str) -> Opt
         source_lower = source.lower().strip()
         phone_sources = ["natif", "native messages", "whatsapp", "whatsapp business"]
 
-        identifiers = []
         used_pseudonymes = 0
         used_phones = 0
 
+        # Agréger par LABEL affiché (pseudonyme) : un même pseudonyme avec plusieurs
+        # identifiants différents doit donner UNE seule barre dont le total = somme des appels
+        # (cohérent avec le tableau résumé).
+        agg_counts = {}   # label -> nombre d'appels cumulé
+        label_order = []  # préserve l'ordre de première apparition
         for d in top15_data:
             # Priorité 1: Pseudonyme (Name) avec émojis
             name = (d.get("Name") or "").strip()
             if name and name.lower() != "inconnu":
-                identifiers.append(name[:50])
+                label = name[:50]
                 used_pseudonymes += 1
-                continue
-
-            # Priorité 2: Identifiant_utilisateur ou Identifier selon la source
-            ident = d.get("Identifiant_utilisateur") or d.get("Identifier") or "Inconnu"
-            if ident and "@" in ident:
-                ident = ident.split("@")[0]
-                if ident and ident[0].isdigit():
-                    ident = "+" + ident
+            else:
+                # Priorité 2: Identifiant_utilisateur ou Identifier selon la source
+                ident = d.get("Identifiant_utilisateur") or d.get("Identifier") or "Inconnu"
+                if ident and "@" in ident:
+                    ident = ident.split("@")[0]
+                    if ident and ident[0].isdigit():
+                        ident = "+" + ident
+                        used_phones += 1
+                elif ident and ident[0].isdigit():
                     used_phones += 1
-            elif ident and ident[0].isdigit():
-                used_phones += 1
-            identifiers.append((ident or "Inconnu")[:50])
+                label = (ident or "Inconnu")[:50]
 
-        counts = [d.get("Nombre_appels", 0) for d in top15_data]
+            cnt = d.get("Nombre_appels", 0) or 0
+            if label in agg_counts:
+                agg_counts[label] += cnt
+            else:
+                agg_counts[label] = cnt
+                label_order.append(label)
+
+        # Re-trier par nombre d'appels décroissant après fusion des pseudonymes
+        merged_labels = sorted(label_order, key=lambda l: agg_counts[l], reverse=True)
+        identifiers = merged_labels
+        counts = [agg_counts[l] for l in merged_labels]
 
         # Légende axe X adaptée selon ce qui est RÉELLEMENT affiché
         if used_pseudonymes >= used_phones and used_pseudonymes > 0:
@@ -2126,40 +2140,57 @@ def generate_calls_top15_duration_chart(top15_data: List[Dict], source: str) -> 
         source_lower = source.lower().strip()
         phone_sources = ["natif", "native messages", "whatsapp", "whatsapp business"]
 
-        identifiers = []
         used_pseudonymes = 0
         used_phones = 0
 
+        # Agréger par LABEL affiché (pseudonyme) : un même pseudonyme avec plusieurs
+        # identifiants différents = UNE barre dont la durée = SOMME des durées (cohérent
+        # avec le tableau résumé).
+        agg_sec = {}      # label -> durée totale cumulée (secondes)
+        label_order = []
         for d in top15_data:
             # Priorité 1: Pseudonyme (Name) avec émojis
             name = (d.get("Name") or "").strip()
             if name and name.lower() != "inconnu":
-                identifiers.append(name[:50])
+                label = name[:50]
                 used_pseudonymes += 1
-                continue
-
-            # Priorité 2: Identifiant_utilisateur ou Identifier selon la source
-            ident = d.get("Identifiant_utilisateur") or d.get("Identifier") or "Inconnu"
-            if ident and "@" in ident:
-                ident = ident.split("@")[0]
-                if ident and ident[0].isdigit():
-                    ident = "+" + ident
-                    used_phones += 1
-            elif ident and ident[0].isdigit():
-                used_phones += 1
-            identifiers.append((ident or "Inconnu")[:50])
-        durations_sec: List[int] = []
-        duration_labels: List[str] = []
-        for d in top15_data:
-            dur_str = d.get("Duree_totale", "00:00:00")
-            parts = str(dur_str).split(':')
-            if len(parts) == 3:
-                secs = int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
-            elif len(parts) == 2:
-                secs = int(parts[0]) * 60 + int(parts[1])
             else:
+                # Priorité 2: Identifiant_utilisateur ou Identifier selon la source
+                ident = d.get("Identifiant_utilisateur") or d.get("Identifier") or "Inconnu"
+                if ident and "@" in ident:
+                    ident = ident.split("@")[0]
+                    if ident and ident[0].isdigit():
+                        ident = "+" + ident
+                        used_phones += 1
+                elif ident and ident[0].isdigit():
+                    used_phones += 1
+                label = (ident or "Inconnu")[:50]
+
+            # Durée de cette entrée en secondes
+            dur_str = d.get("Duree_totale", "00:00:00")
+            try:
+                parts = str(dur_str).split(':')
+                if len(parts) == 3:
+                    secs = int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
+                elif len(parts) == 2:
+                    secs = int(parts[0]) * 60 + int(parts[1])
+                else:
+                    secs = 0
+            except (ValueError, TypeError):
                 secs = 0
-            durations_sec.append(secs)
+
+            if label in agg_sec:
+                agg_sec[label] += secs
+            else:
+                agg_sec[label] = secs
+                label_order.append(label)
+
+        # Re-trier par durée totale décroissante après fusion des pseudonymes
+        merged_labels = sorted(label_order, key=lambda l: agg_sec[l], reverse=True)
+        identifiers = merged_labels
+        durations_sec: List[int] = [agg_sec[l] for l in merged_labels]
+        duration_labels: List[str] = []
+        for secs in durations_sec:
             h = secs // 3600
             m = (secs % 3600) // 60
             s = secs % 60
@@ -2207,31 +2238,43 @@ def generate_chats_top15_count_chart(top15_data: List[Dict], source: str) -> Opt
         source_lower = source.lower().strip()
         phone_sources = ["natif", "native messages", "whatsapp", "whatsapp business"]
 
-        identifiers = []
         used_pseudonymes = 0
         used_phones = 0
 
+        # Agréger par LABEL affiché (pseudonyme) : un même pseudonyme avec plusieurs
+        # identifiants différents = UNE barre dont le total = somme des messages (cohérent
+        # avec le tableau résumé).
+        agg_counts = {}
+        label_order = []
         for d in top15_data:
             # Priorité 1: Pseudonyme (Name) avec émojis
             name = (d.get("Name") or "").strip()
             if name and name.lower() != "inconnu":
-                identifiers.append(name[:50])
+                label = name[:50]
                 used_pseudonymes += 1
-                continue
-
-            # Priorité 2: Identifiant_utilisateur ou Identifier selon la source
-            ident = d.get('Identifiant_utilisateur') or d.get('Identifier') or 'Inconnu'
-            # Nettoyer les numéros (590690196318@s.whatsapp.net → +590690196318)
-            if ident and "@" in ident:
-                ident = ident.split("@")[0]
-                if ident and ident[0].isdigit():
-                    ident = "+" + ident
+            else:
+                # Priorité 2: Identifiant_utilisateur ou Identifier selon la source
+                ident = d.get('Identifiant_utilisateur') or d.get('Identifier') or 'Inconnu'
+                # Nettoyer les numéros (590690196318@s.whatsapp.net → +590690196318)
+                if ident and "@" in ident:
+                    ident = ident.split("@")[0]
+                    if ident and ident[0].isdigit():
+                        ident = "+" + ident
+                        used_phones += 1
+                elif ident and ident[0].isdigit():
                     used_phones += 1
-            elif ident and ident[0].isdigit():
-                used_phones += 1
-            identifiers.append((ident or 'Inconnu')[:50])
+                label = (ident or 'Inconnu')[:50]
 
-        counts = [d.get('Nombre_messages', 0) for d in top15_data]
+            cnt = d.get('Nombre_messages', 0) or 0
+            if label in agg_counts:
+                agg_counts[label] += cnt
+            else:
+                agg_counts[label] = cnt
+                label_order.append(label)
+
+        merged_labels = sorted(label_order, key=lambda l: agg_counts[l], reverse=True)
+        identifiers = merged_labels
+        counts = [agg_counts[l] for l in merged_labels]
 
         # Légende axe X adaptée selon ce qui est RÉELLEMENT affiché
         if used_pseudonymes >= used_phones and used_pseudonymes > 0:
@@ -2876,6 +2919,61 @@ def generate_message_images(messages: List[Dict], contact_name: str, source: str
                 return []
             return [" ".join(words[i:i + n_per_line]) for i in range(0, len(words), n_per_line)]
 
+        def _measure_text_width(text, font):
+            try:
+                return int(font.getlength(text))
+            except Exception:
+                try:
+                    bbox = font.getbbox(text)
+                    return bbox[2] - bbox[0]
+                except Exception:
+                    return len(text) * 8 * RESOLUTION_SCALE
+
+        def _wrap_by_pixels(text, font, max_width_px):
+            """
+            Wrap par largeur de pixels: chaque ligne tient dans max_width_px.
+            Si un mot seul depasse, on le split caractere par caractere pour eviter
+            qu'il soit tronque par le masque arrondi de la bulle (cas long URL,
+            email, identifiant @s.whatsapp.net, etc.).
+            """
+            if not text:
+                return []
+            words = str(text).split()
+            if not words:
+                return []
+            lines = []
+            current = ""
+            for word in words:
+                # Mot seul plus large que la limite : split char par char.
+                if _measure_text_width(word, font) > max_width_px:
+                    if current:
+                        lines.append(current)
+                        current = ""
+                    chunk = ""
+                    for ch in word:
+                        if chunk and _measure_text_width(chunk + ch, font) > max_width_px:
+                            lines.append(chunk)
+                            chunk = ch
+                        else:
+                            chunk += ch
+                    if chunk:
+                        current = chunk
+                    continue
+                candidate = f"{current} {word}".strip() if current else word
+                if _measure_text_width(candidate, font) <= max_width_px:
+                    current = candidate
+                else:
+                    if current:
+                        lines.append(current)
+                    current = word
+            if current:
+                lines.append(current)
+            return lines
+
+        # Largeur de texte disponible (sans padding gauche/droit) pour le wrap.
+        BUBBLE_TEXT_MAX_WIDTH = MAX_BUBBLE_WIDTH - 2 * bubble_padding
+        CLEAN_BUBBLE_TEXT_MAX_WIDTH = CLEAN_BUBBLE_WIDTH - 2 * bubble_padding
+
         result = []
         base_id = uuid.uuid4().hex[:8]
 
@@ -2897,11 +2995,11 @@ def generate_message_images(messages: List[Dict], contact_name: str, source: str
             content_lines = []
 
             if from_user:
-                for line in _wrap_by_words(from_user, CLEAN_WORDS_PER_LINE):
+                for line in _wrap_by_pixels(from_user, font_sender, BUBBLE_TEXT_MAX_WIDTH):
                     content_lines.append(("sender", line))
 
             if body and body.strip() and body != "None":
-                for line in _wrap_by_words(body, CLEAN_WORDS_PER_LINE):
+                for line in _wrap_by_pixels(body, font_body, BUBBLE_TEXT_MAX_WIDTH):
                     content_lines.append(("body", line))
 
             # Collecter les images et vidéos d'attachments pour les afficher
@@ -3185,6 +3283,24 @@ def generate_message_images(messages: List[Dict], contact_name: str, source: str
             msg_attachment_height = attachment_height
             msg_transcription_height = transcription_height
 
+            # Re-wrap par pixels les lignes attachment/transcription/timestamp ajoutees
+            # plus haut sans controle de largeur (noms de fichier longs, contacts
+            # partages, transcriptions audio...). Les lignes sender/body sont deja
+            # wrappees a l'ajout, ce passage est idempotent pour elles.
+            _font_map_full = {
+                "sender": msg_font_sender,
+                "body": msg_font_body,
+                "attachment": msg_font_timestamp,
+                "transcription": msg_font_body,
+                "timestamp": msg_font_timestamp,
+            }
+            _rewrapped_full = []
+            for _lt, _lx in content_lines:
+                _f = _font_map_full.get(_lt, msg_font_body)
+                for _sub in _wrap_by_pixels(_lx, _f, BUBBLE_TEXT_MAX_WIDTH):
+                    _rewrapped_full.append((_lt, _sub))
+            content_lines = _rewrapped_full
+
             # Largeur ADAPTATIVE: mesurer la ligne la plus large du contenu textuel
             # et ajouter le padding. La bulle s'etend entre MIN et MAX uniquement.
             content_max_px = 0
@@ -3294,42 +3410,47 @@ def generate_message_images(messages: List[Dict], contact_name: str, source: str
             img.save(msg_path, "PNG", compress_level=1, dpi=(300, 300))
 
             # === BULLE CLEAN pour le BACKEND DOCX (toujours generee) ===
-            # Calibri 12 partout, largeur FIXE, wrap par mots (~7 par ligne).
-            # Le frontend (preview) utilise msg_path (full); le backend prefere image_path_clean.
+            # Calibri 16 partout, largeur FIXE 7 cm, polices preservees.
+            # Les miniatures video sont desormais INTEGREES dans la bulle CLEAN
+            # (et non plus inserees separement apres la bulle dans le docx).
             clean_path_str = None
-            composite_save_path = None
 
-            # 1) Sauvegarder le composite vidéo DOCX si présent (sans spacing fort)
+            # 1) Recuperer les composites video (spacing serre 4 px) prepares pour
+            # le docx et les redimensionner pour tenir dans la largeur utile de la
+            # bulle clean (sans toucher aux polices texte).
+            clean_embedded_videos = []
             if embedded_images:
-                docx_composite_obj = None
                 for _va in video_attachments:
-                    cand = _va.get("_docx_composite_pending")
-                    if cand is not None:
-                        docx_composite_obj = cand
-                        break
-                if docx_composite_obj is not None:
-                    try:
-                        composite_filename = f"vidcomp_{uuid.uuid4().hex[:8]}.png"
-                        composite_disk_path = UPLOAD_DIR / composite_filename
-                        docx_composite_obj.save(composite_disk_path, "PNG", optimize=True)
-                        composite_save_path = str(composite_disk_path)
-                    except Exception as _e:
-                        print(f"[VID COMP] Erreur sauvegarde composite: {_e}")
-                for _va in video_attachments:
-                    _va.pop("_docx_composite_pending", None)
+                    cand = _va.pop("_docx_composite_pending", None)
+                    if cand is None:
+                        continue
+                    if cand.width > CLEAN_BUBBLE_TEXT_MAX_WIDTH:
+                        new_w = CLEAN_BUBBLE_TEXT_MAX_WIDTH
+                        new_h = int(cand.height * (new_w / cand.width))
+                        cand = cand.resize((new_w, new_h), Image.LANCZOS)
+                    clean_embedded_videos.append(cand)
 
-            # 2) Construire content_lines_clean avec wrap par MOTS (au lieu de px)
+            # 2) Construire content_lines_clean avec wrap par largeur de pixels.
+            # Garantit qu'aucun mot/URL ne sera tronque par le masque arrondi de la bulle.
             content_lines_clean = []
             if from_user:
-                for _line in _wrap_by_words(from_user, CLEAN_WORDS_PER_LINE):
+                for _line in _wrap_by_pixels(from_user, font_sender_clean, CLEAN_BUBBLE_TEXT_MAX_WIDTH):
                     content_lines_clean.append(("sender", _line))
             if body and body.strip() and body != "None":
-                for _line in _wrap_by_words(body, CLEAN_WORDS_PER_LINE):
+                for _line in _wrap_by_pixels(body, font_body_clean, CLEAN_BUBBLE_TEXT_MAX_WIDTH):
                     content_lines_clean.append(("body", _line))
-            # Re-attacher les lignes attachment/transcription/timestamp issues du contenu full
+            # Re-attacher les lignes attachment/transcription/timestamp en les wrappant
+            # par largeur de pixels (noms de fichier longs, contacts partages, transcriptions).
+            _font_map_clean = {
+                "attachment": font_timestamp_clean,
+                "transcription": font_body_clean,
+                "timestamp": font_timestamp_clean,
+            }
             for _lt, _lx in content_lines:
                 if _lt in ("attachment", "transcription", "timestamp"):
-                    content_lines_clean.append((_lt, _lx))
+                    _f = _font_map_clean[_lt]
+                    for _sub in _wrap_by_pixels(_lx, _f, CLEAN_BUBBLE_TEXT_MAX_WIDTH):
+                        content_lines_clean.append((_lt, _sub))
 
             # 3) Calculer la hauteur (largeur FIXE = CLEAN_BUBBLE_WIDTH)
             bubble_height_clean = bubble_padding * 2
@@ -3339,6 +3460,9 @@ def generate_message_images(messages: List[Dict], contact_name: str, source: str
                 elif _lt == "attachment": bubble_height_clean += CLEAN_ATTACHMENT_HEIGHT
                 elif _lt == "transcription": bubble_height_clean += CLEAN_TRANSCRIPTION_HEIGHT
                 else: bubble_height_clean += CLEAN_LINE_HEIGHT
+            # Ajouter la hauteur des miniatures video dans la bulle CLEAN
+            for _emb in clean_embedded_videos:
+                bubble_height_clean += _emb.height + 8 * RESOLUTION_SCALE
             bubble_width_clean = CLEAN_BUBBLE_WIDTH
 
             # 4) Rendre la bulle clean
@@ -3367,6 +3491,10 @@ def generate_message_images(messages: List[Dict], contact_name: str, source: str
                 else:
                     _draw_text_safe(draw_c, (tx_c, ty_c), _lx, fill=text_color, font=font_body_clean)
                     ty_c += CLEAN_LINE_HEIGHT
+            # Coller les miniatures video dans la bulle CLEAN (apres les lignes de texte)
+            for _emb in clean_embedded_videos:
+                img_c.paste(_emb, (bubble_padding, ty_c), _emb if _emb.mode == 'RGBA' else None)
+                ty_c += _emb.height + 8 * RESOLUTION_SCALE
             try:
                 clean_filename = f"msg_{safe_name}_{base_id}_{msg_idx + 1}_clean.png"
                 clean_disk_path = UPLOAD_DIR / clean_filename
@@ -3375,10 +3503,9 @@ def generate_message_images(messages: List[Dict], contact_name: str, source: str
             except Exception as _e:
                 print(f"[CLEAN BUBBLE] Erreur sauvegarde: {_e}")
 
-            # Propager composite_path sur chaque entree video_attachments
-            if composite_save_path:
-                for _va in video_attachments:
-                    _va["composite_path"] = composite_save_path
+            # Les miniatures video sont maintenant DANS la bulle CLEAN, donc on
+            # ne propage plus composite_path pour eviter une double insertion
+            # cote remplace_rapport.py.
 
             # Ajouter aux résultats
             result.append({
@@ -3410,7 +3537,7 @@ def generate_message_images(messages: List[Dict], contact_name: str, source: str
 
 
 @app.post("/api/import-excel", dependencies=[Depends(require_api_key)])
-async def import_excel(file: UploadFile = File(...), preserve: bool = False):
+async def import_excel(file: UploadFile = File(...)):
     """
     Import Excel - SYSTÈME STREAMING HAUTE PERFORMANCE
     ==================================================
@@ -3420,12 +3547,6 @@ async def import_excel(file: UploadFile = File(...), preserve: bool = False):
     3. Conversion multi-parquet par UUID
     4. Analyses via Polars lazy (scan_parquet)
     5. Génération graphiques
-
-    preserve=True : ne supprime pas l'ancien import (parquet + graphiques),
-    de sorte que les references existantes dans le state UI (state.excelTables,
-    state.excelCharts) restent valides. L'ancien import et le nouveau coexistent
-    sur disque ; _current_analyzer bascule sur le nouveau. Le frontend reste
-    responsable de ne pas ecraser les valeurs deja saisies par l'utilisateur.
     """
     if not file.filename:
         raise HTTPException(status_code=400, detail="Aucun fichier fourni")
@@ -3438,12 +3559,9 @@ async def import_excel(file: UploadFile = File(...), preserve: bool = False):
         global _current_import, _current_analyzer, _last_platforms_data, _owner_usernames
         start_time = time.perf_counter()
 
-        # Nettoyage des fichiers du dump précédent (sauf en mode preserve)
-        if preserve:
-            print("[IMPORT] Mode preserve actif: ancien import et graphiques conserves")
-        else:
-            cleanup_result = cleanup_previous_import()
-            print(f"[IMPORT] Nettoyage: {cleanup_result['data_cleaned']} dossiers data, {cleanup_result['uploads_cleaned']} graphiques")
+        # Nettoyage des fichiers du dump précédent
+        cleanup_result = cleanup_previous_import()
+        print(f"[IMPORT] Nettoyage: {cleanup_result['data_cleaned']} dossiers data, {cleanup_result['uploads_cleaned']} graphiques")
 
         # Lecture du fichier (streaming pour gros fichiers)
         content = await file.read()
@@ -3624,7 +3742,7 @@ async def import_excel(file: UploadFile = File(...), preserve: bool = False):
         _last_platforms_data = {
             "contacts": [p[0] for p in sorted(source_counts.items(), key=lambda x: x[1], reverse=True) if p[0] and p[0].strip()] if source_counts else [],
             "calls": [p[0] for p in sorted(calls_source_counts.items(), key=lambda x: x[1], reverse=True) if p[0] and p[0].strip()] if calls_source_counts else [],
-            "chats": [p[0] for p in sorted(chats_source_counts.items(), key=lambda x: x[1], reverse=True) if p[0] and p[0].strip()] if chats_source_counts else [],
+            "chats": [p[0] for p in sorted(chats_source_counts.items(), key=lambda x: x[1], reverse=True) if p[0] and p[0].strip() and p[0] not in EXCLUDED_CHAT_TOP15_SOURCES] if chats_source_counts else [],
             "accounts": accounts_list
         }
 

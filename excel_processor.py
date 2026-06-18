@@ -185,8 +185,14 @@ EXCLUDED_SOURCES = {
     'Google Quick Search Box', 'SSRM Heating Log'
 }
 
-# Sources à exclure spécifiquement pour Chats (Facebook mais pas Facebook Messenger)
-EXCLUDED_CHAT_SOURCES = EXCLUDED_SOURCES | {'Facebook'}
+# Chats: Facebook est CONSERVÉ dans les données générales (compté dans {nbmessage}
+# et affiché dans le graphique "messages par plateforme"). Il reste exclu uniquement
+# du Top 15 (voir EXCLUDED_CHAT_TOP15_SOURCES ci-dessous).
+EXCLUDED_CHAT_SOURCES = EXCLUDED_SOURCES
+
+# Sources exclues UNIQUEMENT des graphiques/sections Top 15 (mais présentes dans
+# les statistiques et graphiques généraux par plateforme).
+EXCLUDED_CHAT_TOP15_SOURCES = {'Facebook'}
 
 EXCLUDED_CONTACT_SOURCES = EXCLUDED_SOURCES | {'Native Messages'}
 
@@ -1184,12 +1190,39 @@ class LazyAnalyzer:
             lf = lf.filter(pl.col("Source") == source_filter)
 
         # Pour "Installed Applications", filtrer les lignes où Name est vide
+        # puis dédoublonner par Name en privilégiant la ligne qui a un
+        # Purchase Date-Time renseigné (cas Snapchat/Spotify duplique : une
+        # entree avec date d'achat + une entree vide pour le meme nom).
         if "installed" in sheet_name.lower() and "application" in sheet_name.lower():
             if "Name" in all_sheet_cols:
                 lf = lf.filter(
                     pl.col("Name").is_not_null() &
                     (pl.col("Name").cast(pl.Utf8).str.strip_chars() != "")
                 )
+                # Detecter la colonne "Purchase Date-Time" (variations possibles)
+                purchase_col = next(
+                    (c for c in all_sheet_cols if "purchase" in c.lower() and "date" in c.lower()),
+                    None,
+                )
+                if purchase_col:
+                    # Trier : lignes avec Purchase non vide AVANT (False < True), puis
+                    # par date la plus recente. unique(keep="first", maintain_order=True)
+                    # garde donc la meilleure ligne par Name.
+                    lf = (
+                        lf.with_columns(
+                            pl.col(purchase_col).is_null().alias("__purchase_is_null"),
+                            (pl.col(purchase_col).cast(pl.Utf8).str.strip_chars() == "")
+                                .fill_null(True)
+                                .alias("__purchase_is_empty"),
+                        )
+                        .sort(
+                            ["__purchase_is_null", "__purchase_is_empty", purchase_col],
+                            descending=[False, False, True],
+                            nulls_last=True,
+                        )
+                        .unique(subset=["Name"], keep="first", maintain_order=True)
+                        .drop(["__purchase_is_null", "__purchase_is_empty"])
+                    )
 
         # SÃ©lectionner uniquement les colonnes demandÃ©es pour l'affichage
         query = lf.select(available_cols)
@@ -1349,6 +1382,9 @@ class LazyAnalyzer:
                         # Nettoyer le nom: supprimer "To:" ou "From:" en fin de chaîne
                         name = whatsapp_match.group(2) or "Inconnu"
                         name = re.sub(r'\s*(To:|From:)\s*$', '', name).strip() or "Inconnu"
+                        # Cellebrite duplique parfois le tel formate apres le nom
+                        # ("Харон, +33 7 56 98 90 86" -> "Харон")
+                        name = self._strip_trailing_phone_in_name(name) or "Inconnu"
                         contact = {
                             "Phone": phone,
                             "Name": name,
@@ -1436,6 +1472,27 @@ class LazyAnalyzer:
                     contacts.append(contact)
 
         return contacts
+
+    @staticmethod
+    def _strip_trailing_phone_in_name(name: str) -> str:
+        """
+        Cellebrite duplique parfois le numero de telephone a la fin du pseudonyme.
+        Ex: "Харон, +33 7 56 98 90 86" -> "Харон"
+        Ex: "Abdul malik 🥉, +33 6 02 24 95 88" -> "Abdul malik 🥉"
+        Ex: "Харон, \u202A+33 7 56 98 90 86\u202C" -> "Харон"
+        Ex: "+33 7 56 98 90 86" (pseudo = juste un tel) -> "" puis "Inconnu" en aval
+        """
+        if not name:
+            return name
+        # Cellebrite/WhatsApp encadrent les numeros par des marqueurs Unicode
+        # bidirectionnels invisibles (LRE U+202A, PDF U+202C, RLE/LRO/RLO/LRI/RLI/FSI/PDI).
+        # On les retire avant d'appliquer le regex sur le numero.
+        cleaned = re.sub(r'[\u202A-\u202E\u2066-\u2069]', '', name)
+        # Retire un numero de tel trailing (avec virgule optionnelle)
+        cleaned = re.sub(r'\s*,?\s*\+?\d[\d\s\-\.]{5,}\d\s*$', '', cleaned).strip()
+        # Securite: retirer une virgule trailing residuelle ("Харон," -> "Харон")
+        cleaned = re.sub(r'\s*,\s*$', '', cleaned).strip()
+        return cleaned
 
     def _extract_owner_from_account(self, account_value: str, source: str) -> Optional[str]:
         """
@@ -3167,6 +3224,9 @@ class LazyAnalyzer:
                 # Garder le numéro pour display avec + devant
                 phone_only = re.sub(r'@s\.whatsapp\.net$', '', username, flags=re.IGNORECASE)
                 display_id = f"+{phone_only}" if not phone_only.startswith('+') else phone_only
+                # Cellebrite duplique parfois le tel formate apres le pseudo dans From
+                # ("...whatsapp.net Харон, +33 7 56 98 90 86" -> name = "Харон")
+                name = self._strip_trailing_phone_in_name(name)
 
             # Exclure l'owner
             if final_id in owner_identifiers:
@@ -3225,6 +3285,9 @@ class LazyAnalyzer:
 
     def get_chats_top15_by_count(self, source_value: str) -> list:
         """Retourne les top 15 contacts par nombre de messages pour une source - VERSION OPTIMISÉE"""
+        # Facebook est présent dans les stats/graphiques généraux mais exclu du Top 15
+        if source_value and source_value in EXCLUDED_CHAT_TOP15_SOURCES:
+            return []
         return self._analyze_chats_fast(source_value)
 
     def _analyze_chats_fast(self, source_value: str = None) -> list:
@@ -3419,6 +3482,9 @@ class LazyAnalyzer:
                 final_id = re.sub(r'@s\.?whatsapp\.?net$', '', clean_id, flags=re.IGNORECASE)
                 phone_only = re.sub(r'@s\.whatsapp\.net$', '', username, flags=re.IGNORECASE)
                 display_id = f"+{phone_only}" if not phone_only.startswith('+') else phone_only
+                # Cellebrite duplique parfois le tel formate apres le pseudo dans From
+                # ("...whatsapp.net Харон, +33 7 56 98 90 86" -> name = "Харон")
+                name = self._strip_trailing_phone_in_name(name)
 
             # Pour les sources telephoniques: exclure les numeros a moins de 8 chiffres
             # (short-codes operateurs type 38600, alertes bancaires, etc.)

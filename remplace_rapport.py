@@ -1354,7 +1354,55 @@ def apply_heading_content_blocks(doc: Document, heading_content: Dict[str, List[
                     account_image_src = block.get("accountImage")
                     account_image_width = block.get("accountImageWidth", 2.0)  # Défaut 2 pouces (~5cm)
 
-                    # Code normal sans image (ou si image non trouvée)
+                    # Résoudre le chemin de l'image de compte (si présente et trouvée)
+                    acc_img_path = None
+                    if account_image_src:
+                        _acc_src = account_image_src.replace("/uploads/", "uploads/") if account_image_src.startswith("/uploads/") else account_image_src
+                        _acc_p = Path(_acc_src)
+                        if _acc_p.exists():
+                            acc_img_path = _acc_p
+                        else:
+                            print(f"[DEBUG] Image compte non trouvée: {_acc_p}")
+
+                    # Si image présente : tableau 2 colonnes (texte | image) pour les afficher CÔTE À CÔTE (comme le frontend)
+                    # En cas d'échec, on retombe sur une insertion de l'image APRÈS le texte (repli garanti).
+                    acc_table = None
+                    acc_left_cell = None
+                    if acc_img_path is not None:
+                        try:
+                            from docx.oxml.ns import qn as _qn
+                            from docx.shared import Inches as _Inches
+                            _acc_table = doc.add_table(rows=1, cols=2)
+                            _acc_table.autofit = False
+                            current_para._p.addnext(_acc_table._tbl)
+                            _left = _acc_table.cell(0, 0)
+                            _right = _acc_table.cell(0, 1)
+                            try:
+                                _left.width = Cm(11); _right.width = Cm(5.5)
+                            except Exception:
+                                pass
+                            # Retirer toutes les bordures du tableau
+                            _tblpr = _acc_table._tbl.tblPr
+                            if _tblpr is None:
+                                _tblpr = OxmlElement('w:tblPr'); _acc_table._tbl.insert(0, _tblpr)
+                            _borders = OxmlElement('w:tblBorders')
+                            for _b in ['top', 'left', 'bottom', 'right', 'insideH', 'insideV']:
+                                _el = OxmlElement(f'w:{_b}'); _el.set(_qn('w:val'), 'none'); _borders.append(_el)
+                            _tblpr.append(_borders)
+                            # Image dans la cellule de droite (centrée) — si ça échoue, on annule le tableau
+                            _img_para = _right.paragraphs[0]
+                            _img_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                            _img_para.add_run().add_picture(str(acc_img_path), width=_Inches(account_image_width))
+                            # Tout est OK : on garde le tableau et on rend le texte dans la cellule gauche
+                            acc_table = _acc_table
+                            acc_left_cell = _left
+                            current_para = acc_left_cell.paragraphs[0]
+                            print(f"[DEBUG] Image compte insérée À CÔTÉ: {acc_img_path}, largeur={account_image_width} pouces")
+                        except Exception as _e:
+                            print(f"[DEBUG] Tableau compte échoué -> repli image après texte: {_e}")
+                            acc_table = None
+                            acc_left_cell = None
+
                     # Gérer les sauts de ligne - chaque ligne devient un paragraphe séparé
                     lines = content.split("\n")
                     for line in lines:
@@ -1431,29 +1479,32 @@ def apply_heading_content_blocks(doc: Document, heading_content: Dict[str, List[
                     except:
                         pass
 
-                    # Insérer l'image de compte si présente (après le texte, alignée à droite)
-                    if account_image_src:
-                        img_src = account_image_src
-                        if img_src.startswith("/uploads/"):
-                            img_src = img_src.replace("/uploads/", "uploads/")
-                        img_path = Path(img_src)
-
-                        if img_path.exists():
-                            try:
-                                from docx.shared import Inches as InchesLocal
-                                # Créer un nouveau paragraphe pour l'image, aligné à droite
-                                new_para = insert_after_in_cell(current_para, "")
-                                new_para.alignment = WD_ALIGN_PARAGRAPH.RIGHT
-                                run_img = new_para.add_run()
-                                run_img.add_picture(str(img_path), width=InchesLocal(account_image_width))
-                                new_para.paragraph_format.space_before = Pt(8)
-                                new_para.paragraph_format.space_after = Pt(12)
-                                current_para = new_para
-                                print(f"[DEBUG] Image compte insérée: {img_path}, largeur={account_image_width} pouces")
-                            except Exception as e:
-                                print(f"[DEBUG] Erreur insertion image compte: {e}")
-                        else:
-                            print(f"[DEBUG] Image compte non trouvée: {img_path}")
+                    # Si on a utilisé le tableau côte à côte : retirer le paragraphe vide de tête
+                    # de la cellule gauche et repositionner le curseur APRÈS le tableau
+                    if acc_table is not None:
+                        try:
+                            _first_p = acc_left_cell.paragraphs[0]
+                            if (not _first_p.text or not _first_p.text.strip()) and len(acc_left_cell.paragraphs) > 1:
+                                _first_p._p.getparent().remove(_first_p._p)
+                        except Exception:
+                            pass
+                        _after_acc = OxmlElement("w:p")
+                        acc_table._tbl.addnext(_after_acc)
+                        current_para = Paragraph(_after_acc, doc)
+                        current_para.paragraph_format.space_before = Pt(8)
+                    elif acc_img_path is not None:
+                        # Repli garanti : insérer l'image APRÈS le texte (alignée à droite)
+                        try:
+                            from docx.shared import Inches as _Inches2
+                            _np = insert_after_in_cell(current_para, "")
+                            _np.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+                            _np.add_run().add_picture(str(acc_img_path), width=_Inches2(account_image_width))
+                            _np.paragraph_format.space_before = Pt(8)
+                            _np.paragraph_format.space_after = Pt(12)
+                            current_para = _np
+                            print(f"[DEBUG] Image compte insérée APRÈS le texte (repli): {acc_img_path}")
+                        except Exception as _e:
+                            print(f"[DEBUG] Erreur repli image compte: {_e}")
                 else:
                     print(f"[DEBUG] Bloc texte ignoré: content vide")
             elif block.get("type") == "image":
@@ -2200,6 +2251,11 @@ def apply_heading_content_blocks(doc: Document, heading_content: Dict[str, List[
                     else:
                         period_text = "N/A"
 
+                    # Override période si l'utilisateur a édité la cellule dans le frontend
+                    _period_override = contact_info.get("period_text")
+                    if _period_override is not None and str(_period_override).strip():
+                        period_text = str(_period_override)
+
                     # Déterminer les colonnes selon le type de source
                     if is_signal:
                         # Signal: 3 colonnes (pas de Pseudonyme)
@@ -2220,6 +2276,7 @@ def apply_heading_content_blocks(doc: Document, heading_content: Dict[str, List[
                     # Créer le tableau récapitulatif
                     summary_table = doc.add_table(rows=2, cols=num_cols)
                     summary_table.autofit = False
+                    summary_table.alignment = WD_TABLE_ALIGNMENT.CENTER
                     current_para._p.addnext(summary_table._tbl)
 
                     # Définir les largeurs de colonnes (en cm)
@@ -2297,6 +2354,39 @@ def apply_heading_content_blocks(doc: Document, heading_content: Dict[str, List[
                     current_para.paragraph_format.space_before = Pt(12)
 
                     print(f"[DEBUG] Tableau récapitulatif inséré: {pseudonyme}, période: {period_start} - {period_end}")
+
+                    # Titre de la conversation (SOUS le tableau récapitulatif) — même style que le frontend
+                    conv_title_para = insert_after_in_cell(current_para, "", "Normal")
+                    conv_title_run = conv_title_para.add_run(f"Conversation avec {contact_name}")
+                    conv_title_run.bold = True
+                    conv_title_run.font.size = Pt(11)
+                    conv_title_run.font.color.rgb = RGBColor(22, 32, 46)   # encre (#16202e)
+                    if source:
+                        conv_src_run = conv_title_para.add_run(f" ({source})")
+                        conv_src_run.font.size = Pt(10)
+                        conv_src_run.font.color.rgb = RGBColor(31, 95, 176)  # bleu institutionnel (#1f5fb0)
+                    conv_title_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    conv_title_para.paragraph_format.space_before = Pt(10)
+                    conv_title_para.paragraph_format.space_after = Pt(4)
+                    current_para = conv_title_para
+
+                    # Légende des messages / position des commentaires (gris #666)
+                    # Cercles ● colorés en vrai vert/bleu (les emojis 🟢🔵 sortent en noir & blanc dans Word)
+                    legend_para = insert_after_in_cell(current_para, "", "Normal")
+                    grey = RGBColor(102, 102, 102)
+                    _r = legend_para.add_run(f"\U0001F4AC {len(message_images)} message(s)  -  ")
+                    _r.font.size = Pt(9); _r.font.color.rgb = grey
+                    _rg = legend_para.add_run("● ")
+                    _rg.font.size = Pt(9); _rg.font.color.rgb = RGBColor(31, 157, 87)   # vert (#1f9d57)
+                    _r2 = legend_para.add_run("Vert : commentaire à gauche   |   ")
+                    _r2.font.size = Pt(9); _r2.font.color.rgb = grey
+                    _rb = legend_para.add_run("● ")
+                    _rb.font.size = Pt(9); _rb.font.color.rgb = RGBColor(31, 95, 176)   # bleu (#1f5fb0)
+                    _r3 = legend_para.add_run("Bleu : commentaire à droite")
+                    _r3.font.size = Pt(9); _r3.font.color.rgb = grey
+                    legend_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    legend_para.paragraph_format.space_after = Pt(8)
+                    current_para = legend_para
 
                     from docx.shared import Inches
                     from docx.oxml.ns import nsdecls, qn
